@@ -1,0 +1,92 @@
+# Entity Detection Configuration
+# This file defines which types of sensitive information to detect and anonymize
+# Add or remove entity types as needed for your use case
+
+entities:
+  # Financial Identifiers
+  - type: "Registration/Company Registration Code"
+    description: "Company registration numbers and codes"
+    example: "123456789"
+    enabled: true
+
+  - type: "VAT Number"
+    description: "VAT identification numbers"
+    example: "FR64850529256"
+    enabled: true
+
+  - type: "IBAN"
+    description: "International Bank Account Numbers"
+    example: "FR7619733000010100001466083"
+    enabled: true
+
+  - type: "Bank Account Number"
+    description: "Bank account numbers (non-IBAN)"
+    example: "1234567890"
+    enabled: true
+
+  # Personal Identifiers
+  - type: "Person Name"
+    description: "Individual person names (first and last)"
+    example: "John Doe"
+    enabled: true
+
+  - type: "Email Address"
+    description: "Email addresses"
+    example: "john.doe@example.com"
+    enabled: true
+
+  - type: "Phone Number"
+    description: "Phone numbers (all formats)"
+    example: "+1-555-123-4567"
+    enabled: true
+
+  # Company Information
+  - type: "Company Name"
+    description: "Company and organization names"
+    example: "Acme Corporation S.A."
+    enabled: true
+
+  - type: "Client Name"
+    description: "Client names (individual or company)"
+    example: "ABC Industries Ltd"
+    enabled: true
+
+  # Address Information
+  - type: "Address"
+    description: "Physical addresses (street, city, postal code)"
+    example: "123 Main Street, Paris 75001"
+    enabled: true
+
+  # Document Numbers
+  - type: "Invoice Number"
+    description: "Invoice and receipt numbers"
+    example: "INV-2024-001234"
+    enabled: false  # Disabled by default - enable if needed
+
+  - type: "Contract Number"
+    description: "Contract reference numbers"
+    example: "CTR-2024-5678"
+    enabled: false  # Disabled by default - enable if needed
+
+  # Other Identifiers
+  - type: "Social Security Number"
+    description: "Social security or national ID numbers"
+    example: "123-45-6789"
+    enabled: true
+
+  - type: "Credit Card Number"
+    description: "Credit card numbers"
+    example: "4532-1234-5678-9010"
+    enabled: true
+
+  - type: "Other Sensitive Identifier"
+    description: "Any other sensitive personal or financial identifiers not covered above"
+    example: "Various"
+    enabled: true
+
+# Replacement Strategy
+replacement_strategy:
+  # How to generate synthetic replacements
+  maintain_format: true  # Keep same format (e.g., country codes, length, structure)
+  use_realistic_data: true  # Generate realistic-looking synthetic data
+  preserve_context: true  # Consider document context when generating replacements

@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>pdf-holomask - Auto-anonymize PDFs with synthetic data</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'green-dark': '#1e2c2d',
+                        'green-darker': '#172d2d',
+                        'green': '#254b45',
+                        'green-light': '#b4dab7',
+                        'green-light-hover': '#d1ead3',
+                        'green-lighter': '#a4dcb4',
+                    }
+                }
+            }
+        }
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    </script>
+</head>
+<body class="bg-gray-50">
+    <div x-data="pdfAnonymizer()" class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm border-b border-gray-200">
+            <div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h1 class="text-3xl font-bold text-gray-900">🎭 pdf-holomask</h1>
+                        <p class="mt-1 text-sm text-gray-600">Auto-anonymize PDFs with synthetic data: same layout, zero leaks</p>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+            <!-- Upload Zone -->
+            <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4">Upload PDF</h2>
+
+                <div class="space-y-4">
+                    <div class="flex items-center justify-center w-full">
+                        <label class="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer hover:bg-gray-50">
+                            <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                                <svg class="w-10 h-10 mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                                </svg>
+                                <p class="mb-2 text-sm text-gray-500"><span class="font-semibold">Click to upload</span> or drag and drop</p>
+                                <p class="text-xs text-gray-500">PDF files only (max 50MB)</p>
+                            </div>
+                            <input type="file" class="hidden" accept=".pdf" @change="selectFile($event)">
+                        </label>
+                    </div>
+
+                    <div x-show="file" class="text-sm text-gray-700">
+                        <strong>Selected:</strong> <span x-text="file?.name"></span>
+                        (<span x-text="formatFileSize(file?.size)"></span>)
+                    </div>
+
+                    <div x-show="error" class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
+                        <span x-text="error"></span>
+                    </div>
+
+                    <button
+                        @click="processFile()"
+                        :disabled="!file || processing"
+                        class="w-full bg-green text-white px-4 py-2 rounded-lg hover:bg-green-dark disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center">
+                        <span x-show="!processing">Process PDF</span>
+                        <span x-show="processing" class="flex items-center">
+                            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Processing...
+                        </span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- X-Ray Slider PDF Comparison -->
+            <div x-show="result" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h3 class="text-lg font-semibold text-gray-900">PDF Comparison</h3>
+                        <p class="text-sm text-gray-600">Drag the slider to reveal original (darker grayscale) vs anonymized (color)</p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <div class="flex items-center gap-2 text-sm text-gray-600">
+                            <span>Page <span x-text="currentPage"></span> / <span x-text="totalPages"></span></span>
+                        </div>
+     
+                    </div>
+                </div>
+
+                <!-- X-Ray Slider Container -->
+                <div class="relative border border-gray-300 rounded overflow-hidden bg-gray-100 flex items-center justify-center"
+                     style="height: 1100px;"
+                     id="pdf-container">
+
+                    <!-- Anonymized PDF (background, full width) -->
+                    <canvas id="anonymized-canvas"
+                            class="absolute shadow-lg"
+                            style="z-index: 1; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white;"></canvas>
+
+                    <!-- Original PDF (foreground, clipped by slider) -->
+                    <canvas id="original-canvas"
+                            class="absolute shadow-lg"
+                            :style="`clip-path: inset(0 ${100-sliderPosition}% 0 0); filter: grayscale(100%) brightness(0.85); z-index: 2; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white;`"></canvas>
+                    
+                    <!-- Light overlay for original side to make it slightly distinct -->
+                    <div class="absolute pointer-events-none"
+                         :style="`clip-path: inset(0 ${100-sliderPosition}% 0 0); background: rgba(0, 0, 0, 0.08); z-index: 2; top: ${canvasTop}px; left: ${canvasLeft}px; width: ${canvasWidth}px; height: ${canvasHeight}px;`"></div>
+
+                    <!-- Slider Divider -->
+                    <div class="absolute w-0.5 bg-black shadow-lg cursor-ew-resize"
+                         :style="`left: ${sliderPixels}px; top: ${canvasTop}px; height: ${canvasHeight}px; z-index: 3;`"
+                         @mousedown="startDrag($event)"
+                         @touchstart="startDrag($event)">
+                        <!-- Drag Handle -->
+                        <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-10 h-10 bg-white rounded-full shadow-xl flex items-center justify-center cursor-grab active:cursor-grabbing border-2 border-black">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" class="text-gray-800">
+                                <path fill="currentColor" d="M21.92 11.62a1 1 0 0 0-.21-.33l-2.5-2.5a1 1 0 0 0-1.42 1.42l.8.79H13V8a1 1 0 0 0-2 0v3H5.41l.8-.79a1 1 0 0 0-1.42-1.42l-2.5 2.5a1 1 0 0 0-.21.33a1 1 0 0 0 0 .76a1 1 0 0 0 .21.33l2.5 2.5a1 1 0 0 0 1.42 0a1 1 0 0 0 0-1.42l-.8-.79H11v3a1 1 0 0 0 2 0v-3h5.59l-.8.79a1 1 0 0 0 0 1.42a1 1 0 0 0 1.42 0l2.5-2.5a1 1 0 0 0 .21-.33a1 1 0 0 0 0-.76"/>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Page Navigation -->
+                <div class="flex items-center justify-center gap-4 mt-4">
+                    <button @click="prevPage()"
+                            :disabled="currentPage === 1"
+                            class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                        </svg>
+                        Previous
+                    </button>
+                    <button @click="nextPage()"
+                            :disabled="currentPage === totalPages"
+                            class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-2">
+                        Next
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Entity List -->
+            <div x-show="result" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h3 class="text-lg font-semibold text-gray-900">Detected Entities</h3>
+                        <p class="text-sm text-gray-600">
+                            Found <span x-text="result?.stats.total_elements"></span> sensitive elements
+                            in <span x-text="result?.stats.processing_time"></span>s
+                        </p>
+                    </div>
+                    <button
+                        @click="downloadAnonymized()"
+                        class="bg-green text-white px-4 py-2 rounded-lg hover:bg-green-dark flex items-center gap-2 shadow-sm font-medium">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                        </svg>
+                        Download Anonymized PDF
+                    </button>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Original</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Replacement</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Page</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Confidence</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                            <template x-for="(entity, index) in result?.entities" :key="index">
+                                <tr>
+                                    <td class="px-6 py-4 whitespace-nowrap">
+                                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full"
+                                              :class="getEntityColor(entity.type)"
+                                              x-text="entity.type"></span>
+                                    </td>
+                                    <td class="px-6 py-4 text-sm text-gray-900 font-mono" x-text="entity.value"></td>
+                                    <td class="px-6 py-4 text-sm text-gray-900 font-mono" x-text="entity.replacement"></td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-sm font-semibold text-gray-700">
+                                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                            Page <span x-text="entity.page" class="ml-1"></span>
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" x-text="(entity.confidence * 100).toFixed(0) + '%'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8 text-center text-sm text-gray-500">
+            <p>Built by <a href="https://holofin.ai" class="text-green hover:text-green-dark">Holofin.ai</a> • Open Source (MIT) </p>
+        </footer>
+    </div>
+
+    <script>
+        function pdfAnonymizer() {
+            return {
+                file: null,
+                processing: false,
+                result: null,
+                error: null,
+                originalPdfUrl: null,
+                sliderPosition: 50,
+                sliderPixels: 0,
+                canvasWidth: 0,
+                canvasHeight: 0,
+                canvasLeft: 0,
+                canvasTop: 0,
+                currentPage: 1,
+                totalPages: 1,
+                isDragging: false,
+                originalPdf: null,
+                anonymizedPdf: null,
+
+                init() {
+                    // Initialize slider position
+                    this.sliderPosition = 50;
+                    
+                    // Update canvas metrics on window resize
+                    window.addEventListener('resize', () => {
+                        if (this.result) {
+                            this.updateCanvasMetrics();
+                        }
+                    });
+                },
+
+                selectFile(event) {
+                    const file = event.target.files[0];
+                    if (file && file.type === 'application/pdf') {
+                        this.file = file;
+                        this.originalPdfUrl = URL.createObjectURL(file);
+                        this.error = null;
+                        this.result = null;
+                    } else {
+                        this.error = 'Please select a valid PDF file';
+                        this.file = null;
+                    }
+                },
+
+                formatFileSize(bytes) {
+                    if (!bytes) return '0 Bytes';
+                    const k = 1024;
+                    const sizes = ['Bytes', 'KB', 'MB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+                },
+
+                async processFile() {
+                    this.processing = true;
+                    this.error = null;
+
+                    const formData = new FormData();
+                    formData.append('file', this.file);
+
+                    try {
+                        const response = await fetch('/api/process', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (!response.ok) {
+                            const error = await response.json();
+                            throw new Error(error.detail || 'Processing failed');
+                        }
+
+                        this.result = await response.json();
+                        
+                        // Sort entities by page number for better display
+                        this.result.entities.sort((a, b) => a.page - b.page);
+                        
+                        // Log debug information
+                        console.log('=== ANONYMIZATION RESULTS ===');
+                        console.log('AI detected:', this.result.stats.total_elements, 'sensitive elements');
+                        console.log('Found in PDF:', this.result.entities.length, 'elements');
+                        
+                        // Group by page
+                        const byPage = {};
+                        this.result.entities.forEach(entity => {
+                            if (!byPage[entity.page]) byPage[entity.page] = [];
+                            byPage[entity.page].push(entity);
+                        });
+                        
+                        // Show elements grouped by page
+                        console.log('\n--- Elements Found & Replaced (by page) ---');
+                        Object.keys(byPage).sort((a, b) => a - b).forEach(page => {
+                            console.log(`\n📄 PAGE ${page}:`);
+                            byPage[page].forEach(entity => {
+                                console.log(`  ✓ ${entity.type}: "${entity.value}" → "${entity.replacement}" (${(entity.confidence * 100).toFixed(0)}% confidence)`);
+                            });
+                        });
+                        
+                        // Show AI confidence summary
+                        console.log('\n--- Summary ---');
+                        console.log('Elements by type:', this.result.stats.elements_by_type);
+                        console.log('Total pages with changes:', Object.keys(byPage).length);
+
+                        // Render PDFs after a short delay to ensure DOM is ready
+                        setTimeout(() => this.renderPdfs(), 100);
+                    } catch (err) {
+                        this.error = err.message;
+                    } finally {
+                        this.processing = false;
+                    }
+                },
+
+                async renderPdfs(pageNum = 1) {
+                    try {
+                        const container = document.getElementById('pdf-container');
+                        const containerWidth = container.offsetWidth;
+                        const containerHeight = container.offsetHeight;
+                        
+                        // Add padding
+                        const padding = 20;
+                        const maxWidth = containerWidth - (padding * 2);
+                        const maxHeight = containerHeight - (padding * 2);
+
+                        // Render original PDF at specified page
+                        if (this.originalPdfUrl) {
+                            console.log('Loading and rendering original page', pageNum);
+                            const loadingTask = pdfjsLib.getDocument(this.originalPdfUrl);
+                            const pdf = await loadingTask.promise;
+
+                            // Store total pages on first load
+                            if (pageNum === 1) {
+                                this.totalPages = pdf.numPages;
+                                console.log('Original PDF loaded, pages:', pdf.numPages);
+                            }
+
+                            const page = await pdf.getPage(pageNum);
+                            const canvas = document.getElementById('original-canvas');
+                            const context = canvas.getContext('2d');
+
+                            // Calculate scale to fit container with padding
+                            const viewport = page.getViewport({ scale: 1.0 });
+                            const scale = Math.min(
+                                maxWidth / viewport.width,
+                                maxHeight / viewport.height
+                            );
+                            const scaledViewport = page.getViewport({ scale: scale });
+
+                            canvas.height = scaledViewport.height;
+                            canvas.width = scaledViewport.width;
+                            
+                            // Clear canvas first
+                            context.clearRect(0, 0, canvas.width, canvas.height);
+
+                            await page.render({
+                                canvasContext: context,
+                                viewport: scaledViewport
+                            }).promise;
+                            console.log('Original page rendered:', canvas.width, 'x', canvas.height);
+                        }
+
+                        // Render anonymized PDF at specified page
+                        if (this.result?.anonymized_pdf) {
+                            console.log('Loading and rendering anonymized page', pageNum);
+                            const pdfData = atob(this.result.anonymized_pdf);
+                            const pdfArray = new Uint8Array(pdfData.length);
+                            for (let i = 0; i < pdfData.length; i++) {
+                                pdfArray[i] = pdfData.charCodeAt(i);
+                            }
+
+                            const loadingTask = pdfjsLib.getDocument({ data: pdfArray });
+                            const pdf = await loadingTask.promise;
+
+                            // Store total pages on first load if not already set
+                            if (pageNum === 1 && !this.totalPages) {
+                                this.totalPages = pdf.numPages;
+                                console.log('Anonymized PDF loaded, pages:', pdf.numPages);
+                            }
+
+                            const page = await pdf.getPage(pageNum);
+                            const canvas = document.getElementById('anonymized-canvas');
+                            const context = canvas.getContext('2d');
+
+                            // Calculate scale to fit container with padding
+                            const viewport = page.getViewport({ scale: 1.0 });
+                            const scale = Math.min(
+                                maxWidth / viewport.width,
+                                maxHeight / viewport.height
+                            );
+                            const scaledViewport = page.getViewport({ scale: scale });
+
+                            canvas.height = scaledViewport.height;
+                            canvas.width = scaledViewport.width;
+                            
+                            // Clear canvas first
+                            context.clearRect(0, 0, canvas.width, canvas.height);
+
+                            await page.render({
+                                canvasContext: context,
+                                viewport: scaledViewport
+                            }).promise;
+                            console.log('Anonymized page rendered:', canvas.width, 'x', canvas.height);
+                        }
+                        
+                        // Update canvas metrics for slider positioning
+                        this.updateCanvasMetrics();
+                    } catch (error) {
+                        console.error('Error rendering PDFs:', error);
+                        this.error = 'Failed to render PDFs: ' + error.message;
+                    }
+                },
+                
+                updateCanvasMetrics() {
+                    const canvas = document.getElementById('anonymized-canvas');
+                    const container = document.getElementById('pdf-container');
+                    
+                    if (canvas && container) {
+                        const containerRect = container.getBoundingClientRect();
+                        const canvasRect = canvas.getBoundingClientRect();
+                        
+                        // Store canvas dimensions
+                        this.canvasWidth = canvas.width;
+                        this.canvasHeight = canvas.height;
+                        
+                        // Calculate canvas position relative to container
+                        this.canvasLeft = canvasRect.left - containerRect.left;
+                        this.canvasTop = canvasRect.top - containerRect.top;
+                        
+                        // Calculate slider position in pixels
+                        this.sliderPixels = this.canvasLeft + (this.canvasWidth * this.sliderPosition / 100);
+                        
+                        console.log('Canvas metrics:', {
+                            canvasWidth: this.canvasWidth,
+                            canvasHeight: this.canvasHeight,
+                            canvasLeft: this.canvasLeft,
+                            canvasTop: this.canvasTop,
+                            sliderPixels: this.sliderPixels
+                        });
+                    }
+                },
+
+                startDrag(event) {
+                    this.isDragging = true;
+                    this.updateSliderPosition(event);
+
+                    // Add global event listeners
+                    const handleMove = (e) => {
+                        if (this.isDragging) {
+                            this.updateSliderPosition(e);
+                        }
+                    };
+
+                    const handleEnd = () => {
+                        this.isDragging = false;
+                        window.removeEventListener('mousemove', handleMove);
+                        window.removeEventListener('mouseup', handleEnd);
+                        window.removeEventListener('touchmove', handleMove);
+                        window.removeEventListener('touchend', handleEnd);
+                    };
+
+                    window.addEventListener('mousemove', handleMove);
+                    window.addEventListener('mouseup', handleEnd);
+                    window.addEventListener('touchmove', handleMove);
+                    window.addEventListener('touchend', handleEnd);
+
+                    event.preventDefault();
+                },
+
+                updateSliderPosition(event) {
+                    const container = document.getElementById('pdf-container');
+                    if (!container) return;
+
+                    const rect = container.getBoundingClientRect();
+                    const clientX = event.clientX || (event.touches && event.touches[0].clientX);
+                    const xInContainer = clientX - rect.left;
+                    
+                    // Constrain to canvas bounds
+                    const canvasRight = this.canvasLeft + this.canvasWidth;
+                    const xInCanvas = Math.max(this.canvasLeft, Math.min(canvasRight, xInContainer));
+                    
+                    // Calculate position relative to canvas
+                    const xRelativeToCanvas = xInCanvas - this.canvasLeft;
+                    const percentage = (xRelativeToCanvas / this.canvasWidth) * 100;
+                    
+                    this.sliderPosition = Math.max(0, Math.min(100, percentage));
+                    this.sliderPixels = xInCanvas;
+                },
+
+                async prevPage() {
+                    if (this.currentPage > 1) {
+                        this.currentPage--;
+                        await this.renderPdfs(this.currentPage);
+                    }
+                },
+
+                async nextPage() {
+                    if (this.currentPage < this.totalPages) {
+                        this.currentPage++;
+                        await this.renderPdfs(this.currentPage);
+                    }
+                },
+
+                downloadAnonymized() {
+                    const pdfData = atob(this.result.anonymized_pdf);
+                    const pdfArray = new Uint8Array(pdfData.length);
+                    for (let i = 0; i < pdfData.length; i++) {
+                        pdfArray[i] = pdfData.charCodeAt(i);
+                    }
+
+                    const blob = new Blob([pdfArray], { type: 'application/pdf' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'anonymized_' + this.file.name;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                },
+
+                getEntityColor(type) {
+                    const colors = {
+                        'IBAN': 'bg-green-light text-green-darker',
+                        'VAT': 'bg-green-lighter text-green-dark',
+                        'Name': 'bg-green-light-hover text-green-darker',
+                        'Email': 'bg-green-lighter text-green-dark',
+                        'Phone': 'bg-green-light text-green-darker',
+                        'Address': 'bg-green-light-hover text-green-dark',
+                        'Company': 'bg-green-lighter text-green-darker',
+                        'Registration': 'bg-green-light text-green-dark',
+                    };
+                    return colors[type] || 'bg-gray-100 text-gray-800';
+                }
+            }
+        }
+    </script>
+</body>
+</html>
