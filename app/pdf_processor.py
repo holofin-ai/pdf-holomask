@@ -1,10 +1,34 @@
 import logging
+import math
 
 import fitz  # PyMuPDF
 
 from app.mistral_analyzer import MistralAnalyzer
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_line_rects(rects, y_tol: float = 2.0, x_gap: float = 6.0):
+    """Merge the per-word rects that page.search_for returns for a multi-token phrase.
+
+    search_for("16 bd des Italiens, 75009 Paris") returns one rect per word, all on the
+    same line. Without merging, the full replacement string is written once per word-rect
+    -> the replacement is stamped on top of itself many times ("Champs-Élysées" x6).
+    We merge rects that sit on the same baseline with only a small horizontal gap into a
+    single region (one occurrence); genuinely separate occurrences stay split.
+    """
+    if not rects:
+        return rects
+    ordered = sorted(rects, key=lambda r: (round(r.y0, 1), r.x0))
+    merged = [fitz.Rect(ordered[0])]
+    for r in ordered[1:]:
+        cur = merged[-1]
+        same_line = abs(r.y0 - cur.y0) <= y_tol and abs(r.y1 - cur.y1) <= y_tol
+        if same_line and (r.x0 - cur.x1) <= x_gap:
+            merged[-1] = cur | r  # union
+        else:
+            merged.append(fitz.Rect(r))
+    return merged
 
 
 def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None) -> dict:
@@ -63,13 +87,34 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
 
                 # Search for each element (full name + individual parts)
                 for search_text, search_replacement in elements_to_search:
-                    text_instances = page.search_for(search_text)
+                    text_instances = _merge_line_rects(page.search_for(search_text))
 
                     if text_instances:
                         logger.info(f"Found {len(text_instances)} instance(s) of {element_type}: '{search_text}' on page {page_num + 1}")
 
                         # Store positions and properties for each instance
                         for rect in text_instances:
+                            # Skip matches that overlap a region already slated for
+                            # replacement. The name-splitting above searches the full
+                            # name AND its last name separately; the last-name match lands
+                            # inside the full-name span and would be written on top of it
+                            # ("PIERRE PIERRE"). Standalone occurrences elsewhere don't
+                            # overlap, so they are still replaced.
+                            overlaps = False
+                            for _k, _info in text_positions.items():
+                                if not _k.startswith(f"{page_num}_"):
+                                    continue
+                                other = _info["rect"]
+                                ix = min(rect.x1, other.x1) - max(rect.x0, other.x0)
+                                iy = min(rect.y1, other.y1) - max(rect.y0, other.y0)
+                                if ix > 0 and iy > 0:
+                                    smaller = min(rect.get_area(), other.get_area())
+                                    if smaller > 0 and (ix * iy) > 0.5 * smaller:
+                                        overlaps = True
+                                        break
+                            if overlaps:
+                                continue
+
                             key = f"{page_num}_{search_text}_{rect.x0}_{rect.y0}"
 
                             # Extract font information from the text at this position
@@ -96,6 +141,7 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
                                                     "font": span.get("font", "helv"),
                                                     "size": actual_size,
                                                     "color": span.get("color", 0),
+                                                    "dir": line.get("dir", (1, 0)),
                                                 }
                                                 break
                                         if span_info:
@@ -104,7 +150,7 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
                                     break
 
                             if not span_info:
-                                span_info = {"font": "helv", "size": 10, "color": 0}
+                                span_info = {"font": "helv", "size": 10, "color": 0, "dir": (1, 0)}
 
                             text_positions[key] = {
                                 "rect": rect,
@@ -150,6 +196,7 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
                     font_map[basefont] = ref_name
 
             # Add replacement text
+            written_rects = []  # regions already drawn on this page (write-time dedup)
             for key, info in text_positions.items():
                 if key.startswith(f"{page_num}_"):
                     rect = info["rect"]
@@ -158,23 +205,62 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
                     original_font = span_info["font"]
                     font_size = span_info["size"]
 
-                    # Strategy 1: Try to reuse the exact font from the page
-                    font = None
-                    if original_font in font_map:
+                    # Safety net: skip if a replacement was already drawn over this region.
+                    # Different detected entities can share a trailing token (e.g. a city
+                    # "Paris" inside an address ".. 75002 Paris"); without this guard both
+                    # are drawn and the glyphs double up.
+                    _dup = False
+                    for wr in written_rects:
+                        ix = min(rect.x1, wr.x1) - max(rect.x0, wr.x0)
+                        iy = min(rect.y1, wr.y1) - max(rect.y0, wr.y0)
+                        if ix > 0 and iy > 0:
+                            smaller = min(rect.get_area(), wr.get_area())
+                            if smaller > 0 and (ix * iy) >= 0.4 * smaller:
+                                _dup = True
+                                break
+                    if _dup:
+                        continue
+                    written_rects.append(fitz.Rect(rect))
+
+                    raw_color = span_info.get("color", 0)
+                    try:
+                        text_color = fitz.sRGB_to_pdf(raw_color) if raw_color else (0, 0, 0)
+                    except Exception:
+                        text_color = (0, 0, 0)
+
+                    # Rotated text (e.g. the vertical reference strip printed up the page
+                    # margin of many French statements). TextWriter writes horizontally,
+                    # which would pile the replacement up garbled in the corner. Detect the
+                    # writing direction and render with insert_textbox at the matching
+                    # 90-degree rotation instead. The original was already white-redacted.
+                    dirx, diry = span_info.get("dir", (1, 0))
+                    angle = int(round(math.degrees(math.atan2(-diry, dirx)))) % 360
+                    if angle != 0:
+                        rot = int(round(angle / 90) * 90) % 360
+                        box = fitz.Rect(rect)
+                        # extend the box along the writing direction so longer synthetic
+                        # values are not clipped (the margin around the strip is empty)
+                        extra = max(60.0, font_size * len(replacement) * 0.65)
+                        if rot in (90, 270):
+                            box.y0 -= extra; box.y1 += extra
+                        else:
+                            box.x0 -= extra; box.x1 += extra
                         try:
-                            # Use page.insert_text with the font reference
-                            baseline_offset = font_size * 0.8
-                            point = (rect.x0, rect.y0 + baseline_offset)
-                            page.insert_text(
-                                point,
-                                replacement,
-                                fontname=font_map[original_font],
-                                fontsize=font_size,
-                                color=span_info.get("color", 0)
+                            page.insert_textbox(
+                                box, replacement, fontname="helv", fontsize=font_size,
+                                rotate=rot, color=text_color,
                             )
-                            continue  # Skip TextWriter fallback
                         except Exception:
-                            pass  # Fall through to TextWriter strategy
+                            pass
+                        continue
+
+                    # NOTE: we intentionally do NOT reuse the page's embedded font
+                    # reference (font_map) via page.insert_text. When the embedded font
+                    # has a missing FontDescriptor (common in bank-statement PDFs), that
+                    # call renders nothing without raising — blanking the field (e.g.
+                    # IBAN/BIC). Instead we always render via TextWriter with a
+                    # guaranteed-loadable font below.
+                    font = None
 
                     # Strategy 2: Try to load the font by name
                     tw = fitz.TextWriter(page.rect)
@@ -202,9 +288,16 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
                     baseline_offset = font_size * 0.8
                     point = (rect.x0, rect.y0 + baseline_offset)
 
+                    # Preserve original text color (span color is a packed sRGB int)
+                    raw_color = span_info.get("color", 0)
+                    try:
+                        text_color = fitz.sRGB_to_pdf(raw_color) if raw_color else (0, 0, 0)
+                    except Exception:
+                        text_color = (0, 0, 0)
+
                     # Append and write the text
                     tw.append(point, replacement, font=font, fontsize=font_size)
-                    tw.write_text(page)
+                    tw.write_text(page, color=text_color)
 
         # Preserve original metadata but add holomask attribution
         metadata = original_metadata.copy() if original_metadata else {}
