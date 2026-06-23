@@ -1,5 +1,6 @@
 import logging
 import math
+import re
 
 import fitz  # PyMuPDF
 
@@ -81,6 +82,24 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
                     elements_to_search.append((name_parts[0], replacement_parts[0]))
                     # Add last name as separate search
                     elements_to_search.append((name_parts[-1], replacement_parts[-1]))
+
+            elif "Address" in element_type and "Email" not in element_type:
+                # Addresses usually wrap across lines (street on one line, postal+city on
+                # the next), so search_for() of the whole value finds nothing and the
+                # address is left untouched. Split both value and replacement at the postal
+                # code (last 4-5 digit run) and search the street and city parts separately.
+                o_codes = list(re.finditer(r"\b\d{4,5}\b", original_text))
+                r_codes = list(re.finditer(r"\b\d{4,5}\b", replacement))
+                if o_codes and r_codes:
+                    om, rm = o_codes[-1], r_codes[-1]
+                    street_o = original_text[: om.start()].strip(" ,;")
+                    city_o = original_text[om.start():].strip(" ,;")
+                    street_r = replacement[: rm.start()].strip(" ,;")
+                    city_r = replacement[rm.start():].strip(" ,;")
+                    if street_o and street_r:
+                        elements_to_search.append((street_o, street_r))
+                    if city_o and city_r:
+                        elements_to_search.append((city_o, city_r))
 
             if page_num < len(doc):
                 page = doc[page_num]
