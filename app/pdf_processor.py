@@ -32,7 +32,12 @@ def _merge_line_rects(rects, y_tol: float = 2.0, x_gap: float = 6.0):
     return merged
 
 
-def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None) -> dict:
+def anonymize_pdf(
+    input_path: str,
+    output_path: str,
+    api_key: str | None = None,
+    analysis_result: dict | None = None,
+) -> dict:
     """
     Anonymize a PDF using AI analysis to detect sensitive information and replace it
     with contextually appropriate synthetic alternatives.
@@ -41,6 +46,11 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
         input_path: Path to the input PDF file
         output_path: Path to save the anonymized PDF
         api_key: Optional Mistral API key (uses env var if not provided)
+        analysis_result: Optional pre-computed analysis (``sensitive_elements`` with
+            value/replacement/page). When provided, Mistral is NOT called — the saved
+            mapping is re-applied deterministically. This lets a corpus be re-rendered
+            with the exact same synthetic values (e.g. after a rendering bug fix)
+            without changing any data.
 
     Returns:
         dict: Analysis result containing identified sensitive information
@@ -48,9 +58,10 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
     Raises:
         Exception: If analysis or PDF processing fails
     """
-    # Analyze the PDF with Mistral AI
-    analyzer = MistralAnalyzer(api_key)
-    analysis_result = analyzer.analyze_document(input_path)
+    # Analyze the PDF with Mistral AI (unless a saved analysis was supplied).
+    if analysis_result is None:
+        analyzer = MistralAnalyzer(api_key)
+        analysis_result = analyzer.analyze_document(input_path)
 
     # Open PDF with PyMuPDF
     doc = fitz.open(input_path)
@@ -191,10 +202,27 @@ def anonymize_pdf(input_path: str, output_path: str, api_key: str | None = None)
         for page_num in range(len(doc)):
             page = doc[page_num]
 
-            # Collect all rectangles to redact on this page
+            # Collect all rectangles to redact on this page.
+            # IMPORTANT: a synthetic replacement is often LONGER than the original token
+            # (e.g. a short merchant name -> "Urban Mobility Solutions"). The text is drawn
+            # starting at rect.x0, so if we only redact the original width it overflows to
+            # the right and lands ON TOP of adjacent un-detected original text (a city, a
+            # location). Extend each redaction rightward to cover the rendered width of the
+            # replacement so the draw area is cleared first — no overlap, no bleed-through.
+            _helv = fitz.Font("helv")
             redact_rects = []
             for key, info in text_positions.items():
                 if key.startswith(f"{page_num}_"):
+                    r = fitz.Rect(info["rect"])
+                    dirx, diry = info["span_info"].get("dir", (1, 0))
+                    if diry == 0:  # horizontal text only (rotated strips handled at draw time)
+                        try:
+                            w = _helv.text_length(info["replacement"], fontsize=info["span_info"]["size"])
+                            if w > r.width:
+                                r.x1 = r.x0 + w + 1.0
+                        except Exception:
+                            pass
+                        info["rect"] = r
                     redact_rects.append(info["rect"])
 
             # Apply white redactions
